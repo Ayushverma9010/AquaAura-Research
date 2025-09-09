@@ -1,0 +1,166 @@
+/*
+2 * AquaAura: ESP32 Firmware (v3.0 - Layout Patched)
+3 * Authors: Ayush Verma, Aditya Kumar
+4 */
+5
+6 // --- WiFi and Web Server Includes ---
+7 #include <WiFi.h>
+8 #include <WebServer.h>
+9
+10 // --- TensorFlow Lite Includes ---
+11 #include <TensorFlowLite_ESP32.h>
+12 #include "tensorflow/lite/micro/all_ops_resolver.h"
+13 #include "tensorflow/lite/micro/micro_error_reporter.h"
+14 #include "tensorflow/lite/micro/micro_interpreter.h"
+15 #include "tensorflow/lite/schema/schema_generated.h"
+16 #include "tensorflow/lite/version.h"
+17
+18 // --- Model Data & Sensor Includes ---
+19 #include "model_data.h"
+20 #include <DHT.h>
+21
+22 // --- WiFi Credentials ---
+23 const char* ssid = "YOUR_WIFI_SSID";
+24 const char* password = "YOUR_WIFI_PASSWORD";
+25
+26 // --- Pin Definitions & Objects ---
+27 #define SOIL_MOISTURE_PIN 34
+28 #define DHT_PIN 4
+29 #define LDR_PIN 35
+30 #define PUMP_RELAY_PIN 27
+31 #define DHTTYPE DHT22
+32 DHT dht(DHT_PIN, DHTTYPE);
+33 WebServer server(80);
+34
+35 // --- TFLite Global Variables ---
+36 tflite::ErrorReporter* error_reporter = nullptr;
+37 const tflite::Model* model = nullptr;
+38 tflite::MicroInterpreter* interpreter = nullptr;
+39 TfLiteTensor* input = nullptr;
+40 TfLiteTensor* output = nullptr;
+41 const int kTensorArenaSize = 4 * 1024;
+42 uint8_t tensor_arena[kTensorArenaSize];
+43
+44 // --- Normalization Constants (from Python) ---
+45 const float X_MIN[] = { 300.0, 15.0, 40.0, 100.0 };
+46 const float X_MAX[] = { 700.0, 35.0, 90.0, 1000.0 };
+47 const float Y_MIN = 100.0;
+48 const float Y_MAX = 800.0;
+49
+50 // --- System State & Timers ---
+51 float current_moisture = 0.0, current_temp = 0.0;
+52 float current_humidity = 0.0, current_light = 0.0;
+53 float predicted_moisture = 0.0;
+54 String pump_status = "OFF";
+55 unsigned long last_inference_time = 0;
+56 const long inference_interval = 30000; // 30s for demo
+57 unsigned long pump_start_time = 0;
+58 const long pump_run_duration = 10000; // 10s
+59
+60 // --- Function Prototypes ---
+61 void setupWiFi(), setupWebServer(), handleRoot(), runInference();
+62
+63 void setup() {
+64 Serial.begin(115200);
+65 pinMode(PUMP_RELAY_PIN, OUTPUT);
+66 digitalWrite(PUMP_RELAY_PIN, LOW);
+67 dht.begin();
+68
+69 setupWiFi();
+70 setupWebServer();
+71
+72 // --- Initialize TFLite ---
+73 static tflite::MicroErrorReporter micro_error_reporter;
+74 error_reporter = μ_error_reporter;
+75 model = tflite::GetModel(g_model);
+76 if (model->version() != TFLITE_SCHEMA_VERSION) {
+77 error_reporter->Report("Model schema version mismatch!"); return;
+78 }
+79 static tflite::AllOpsResolver resolver;
+80 static tflite::MicroInterpreter static_interpreter(model, resolver, tensor_arena,
+,→ kTensorArenaSize, error_reporter);
+81 interpreter = &static_interpreter;
+82 if (interpreter->AllocateTensors() != kTfLiteOk) {
+83 error_reporter->Report("AllocateTensors() failed"); return;
+84 }
+85 input = interpreter->input(0);
+86 output = interpreter->output(0);
+87
+88 Serial.println("System is running.");
+89 }
+90
+91 void loop() {
+92 server.handleClient();
+93 if (pump_status == "ON" && millis() - pump_start_time > pump_run_duration) {
+94 digitalWrite(PUMP_RELAY_PIN, LOW);
+95 pump_status = "OFF";
+96 }
+97 if (millis() - last_inference_time > inference_interval) {
+98 runInference();
+99 last_inference_time = millis();
+100 }
+101 }
+102
+103 void runInference() {
+104 current_moisture = analogRead(SOIL_MOISTURE_PIN);
+105 current_light = analogRead(LDR_PIN);
+106 current_humidity = dht.readHumidity();
+107 current_temp = dht.readTemperature();
+108 if (isnan(current_humidity) || isnan(current_temp)) return;
+109
+110 float inputs[4];
+111 inputs[0] = (current_moisture - X_MIN[0]) / (X_MAX[0] - X_MIN[0]);
+112 inputs[1] = (current_temp - X_MIN[1]) / (X_MAX[1] - X_MIN[1]);
+113 inputs[2] = (current_humidity - X_MIN[2]) / (X_MAX[2] - X_MIN[2]);
+114 inputs[3] = (current_light - X_MIN[3]) / (X_MAX[3] - X_MIN[3]);
+115
+116 for(int i=0; i<4; i++) { input->data.f[i] = inputs[i]; }
+117 if (interpreter->Invoke() != kTfLiteOk) return;
+118 float prediction_norm = output->data.f[0];
+119 predicted_moisture = prediction_norm * (Y_MAX - Y_MIN) + Y_MIN;
+120
+121 const float IRRIGATION_THRESHOLD = 350.0;
+122 if (predicted_moisture < IRRIGATION_THRESHOLD && pump_status == "OFF") {
+123 digitalWrite(PUMP_RELAY_PIN, HIGH);
+124 pump_status = "ON";
+125 pump_start_time = millis();
+126 }
+127 }
+128
+129 void setupWiFi() {
+130 WiFi.begin(ssid, password);
+131 Serial.print("Connecting to WiFi...");
+132 int count = 0;
+133 while (WiFi.status() != WL_CONNECTED && count < 20) {
+134 delay(500); Serial.print("."); count++;
+135 }
+136 if(WiFi.status() == WL_CONNECTED) {
+137 Serial.println("\nWiFi connected!");
+138 Serial.print("IP: "); Serial.println(WiFi.localIP());
+139 } else {
+140 Serial.println("\nCould not connect to WiFi.");
+141 }
+142 }
+143
+144 void setupWebServer() {
+145 server.on("/", handleRoot);
+146 server.begin();
+147 }
+148
+149 void handleRoot() {
+150 String html = "<!DOCTYPE html><html><head><title>AquaAura Monitor</title>";
+151 html += "<meta http-equiv='refresh' content='10'>";
+152 html += "<style>body{font-family:sans-serif;text-align:center;}";
+153 html += "h1{color:#005f73;} .card{background-color:white;padding:20px;margin:20px
+
+auto;border-radius:10px;box-shadow:0 4px 8px 0
+rgba(0,0,0,0.2);max-width:400px;}</style></head>";
+,→
+,→
+154 html += "<body><div class='card'><h1> AquaAura AI Monitor</h1>";
+155 html += "<p>Current Moisture: " + String(current_moisture) + "</p>";
+156 html += "<p>Temperature: " + String(current_temp) + " °C</p>";
+157 html += "<p>AI Predicted Moisture: " + String(predicted_moisture) + "</p>";
+158 html += "<h2>Pump Status: " + pump_status + "</h2></div></body></html>";
+159 server.send(200, "text/html", html);
+160 }
