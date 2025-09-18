@@ -1,88 +1,47 @@
-# AquaAura: AI Model Training Script (v3.0 - Corrected)
-  import numpy as np
-  import pandas as pd
-  import tensorflow as tf
-  from sklearn.model_selection import train_test_split
-  from sklearn.preprocessing import MinMaxScaler
-  import os
- 
-  print(f"TensorFlow Version: { tf.__version__} ")
- 
-  # --- 1. Generate and Prepare Data ---
-  def generate_mock_data(num_samples=2000):
-  np.random.seed(42)
-  temp = np.random.uniform(15, 35, num_samples)
-humidity = np.random.uniform(40, 90, num_samples)
-  light = np.random.uniform(100, 1000, num_samples)
-  initial_moisture = np.random.uniform(300, 700, num_samples)
- 
-  # CORRECTED: Future moisture calculation
-  future_moisture = (initial_moisture
-  - (temp - 25) * 5
-  - (light - 500) * 0.1
- + (humidity - 60) * 2
-  + np.random.normal(0, 25, num_samples))
- 
-  future_moisture = np.clip(future_moisture, 100, 800)
- 
-  data = pd.DataFrame({
-  'temperature': temp, 'humidity': humidity, 'light_intensity': light,
-  'current_moisture': initial_moisture,
-  'future_moisture_target': future_moisture
-  })
-  return data
- 
-  dataset = generate_mock_data()
-  features = ['current_moisture', 'temperature', 'humidity', 'light_intensity']
-  target = 'future_moisture_target'
-  X = dataset[features].values
-  y = dataset[target].values
- 
-  scaler_X = MinMaxScaler()
-  X_scaled = scaler_X.fit_transform(X)
-  scaler_y = MinMaxScaler()
-  y_scaled = scaler_y.fit_transform(y.reshape(-1, 1))
- 
-  X_train, X_val, y_train, y_val = train_test_split(X_scaled, y_scaled, test_size=0.2,
-,→ random_state=42)
- 
-  # --- 2. Build and Train the Model ---
-  model = tf.keras.Sequential([
-  tf.keras.layers.InputLayer(input_shape=(len(features),)),
-  tf.keras.layers.Dense(16, activation='relu'),
-  tf.keras.layers.Dense(8, activation='relu'),
-  tf.keras.layers.Dense(1)
-  ])
- model.compile(optimizer='adam', loss='mean_squared_error')
- model.fit(X_train, y_train, epochs=50, batch_size=32, validation_data=(X_val, y_val),
-,→ verbose=0)
- print("Model training complete.")
+# AquaAura: AI Model Training Script (v3.0 - Corrected & Cleaned)
 
- # --- 3. Convert Model to TFLite and C array ---
- converter = tf.lite.TFLiteConverter.from_keras_model(model)
- converter.optimizations = [tf.lite.Optimize.DEFAULT]
- tflite_model = converter.convert()
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+import os
 
- # Auto-generate the C header file
- try:
- with open("model_data.h", "w") as header_file:
- model_name = "g_model"
- header_file.write(f"const unsigned char { model_name} [] = {{\n")
- for i, byte in enumerate(tflite_model):
- if i % 12 == 0: header_file.write("\n ")
- header_file.write(f"0x{ byte: 02x} , ")
- header_file.write("\n};\n")
-header_file.write(f"const unsigned int { model_name} _len =
+print(f"TensorFlow Version: {tf.__version__}")
 
-,→ { len(tflite_model)} ;\n")
+# --- 1. Generate and Prepare Data ---
+def generate_mock_data(num_samples=2000):
+    np.random.seed(42)
+    temp = np.random.uniform(15, 35, num_samples)
+    humidity = np.random.uniform(40, 90, num_samples)
+    light = np.random.uniform(100, 1000, num_samples)
+    initial_moisture = np.random.uniform(300, 700, num_samples)
 
- print("'model_data.h' generated successfully!")
- except Exception as e:
- print(f"Could not generate 'model_data.h': { e} ")
+    # Future moisture calculation (corrected)
+    future_moisture = (
+        initial_moisture
+        - (temp - 25) * 5
+        - (light - 500) * 0.1
+        + (humidity - 60) * 2
+        + np.random.normal(0, 25, num_samples)
+    )
 
- # --- 4. Print Scaling Parameters for ESP32 ---
-  print("\n--- SCALING PARAMETERS FOR ESP32 ---")
-  print(f"const float X_MIN[] = {{ { ', '.join(map(str, scaler_X.min_))} }};")
-  print(f"const float X_MAX[] = {{ { ', '.join(map(str, scaler_X.data_max_)) }} ;")
-  print(f"const float Y_MIN = { scaler_y.min_[0]} ;")
-  print(f"const float Y_MAX = { scaler_y.data_max_[0]} ;")
+    future_moisture = np.clip(future_moisture, 100, 800)
+
+    data = pd.DataFrame({
+        'temperature': temp,
+        'humidity': humidity,
+        'light_intensity': light,
+        'current_moisture': initial_moisture,
+        'future_moisture_target': future_moisture
+    })
+    return data
+
+
+dataset = generate_mock_data()
+features = ['current_moisture', 'temperature', 'humidity', 'light_intensity']
+target = 'future_moisture_target'
+
+X = dataset[features].values
+y = dataset[target].values
+
